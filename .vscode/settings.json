@@ -1,0 +1,7 @@
+{
+    "idf.portWin": "COM14",
+    "idf.flashType": "UART",
+    "idf.espIdfPathWin": "C:\\Users\\andre\\esp\\v4.4.8\\esp-idf",
+    "idf.toolsPathWin": "C:\\Users\\andre\\.espressif",
+    "idf.pythonInstallPath": "C:\\Users\\andre\\.espressif\\tools\\idf-python\\3.8.7\\python.exe"
+}

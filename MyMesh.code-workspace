@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "Heltec cubecell",
+			"path": "../Heltec cubecell"
+		},
+		{
+			"name": "MyMeshV2",
+			"path": "../MyMeshV2"
+		}
+	],
+	"settings": {}
+}
