@@ -36,17 +36,18 @@
 //#include "Wire.h"
 #include <TimeLib.h>
 #include <string.h>
-#include "SHT3x.h"
-#include "HDC1080.h"
-#include <BH1750.h>
-#include <BMP180.h>
-#include <BMP280.h>
-#include "HDC1080.h"
-#include <MPU9250.h>
-#include <ccs811.h>
-#include "Adafruit_PM25AQI.h"
-#include <Bme280.h>
-#include <AHTxx.h>
+#include "SHT3x.h"      // for humidity and temperature sensor
+#include "HDC1080.h"    // for humidity and temperature sensor
+#include <BH1750.h>    //device for light sensor
+#include <BMP180.h>    //device for pressure sensor
+#include <BMP280.h>     //device for pressure sensor
+#include "HDC1080.h"    //device for humidity and temperature sensor
+//#include <MPU9250.h>   //device for motion sensor
+#include <ccs811.h>     //device for air quality sensor
+#include "Adafruit_PM25AQI.h" //device for air quality sensor
+#include <SPL07-003.h>
+#include <Bme280.h>     //device for humidity, pressure and temperature sensor
+#include <AHTxx.h>     //device for humidity and temperature sensor
 AHTxx aht10(AHTXX_ADDRESS_X38, AHT1x_SENSOR); //sensor address, sensor type
 
 Bme280TwoWire BME280;
@@ -55,10 +56,11 @@ Adafruit_PM25AQI aqi = Adafruit_PM25AQI();
 BH1750 lightMeter;
 BMP085 bmp180;
 HDC1080 hdc1080;
-MPU9250 mySensor;
+SPL07_003 spa;
+//MPU9250 mySensor;
 CCS811 ccs;
 
-byte address;
+byte Device;
 float aX, aY, aZ, aSqrt, gX, gY, gZ, mDirection, mX, mY, mZ;
 uint16_t x_data,y_data,z_data;
 
@@ -151,16 +153,18 @@ TinyGPSPlus GPS;
 
 #define RX_TIMEOUT_VALUE                            900
 #define BUFFER_SIZE                                 255 // Define the payload size here
-uint32_t TxLastTime ;         // timestamp last TX
-uint32_t RxLastTime ;
-uint32_t TXinterval ;   // calculated time until next TX
-uint32_t RXinterval ;
+uint32_t SleepMillis ;         // how long was sleep time in millis
+uint32_t TxStartTime;
+uint32_t TxLength=3000;
+//uint32_t RXinterval ;
 uint32_t sleepTime;
 uint32_t GoSleep;
 byte txpacket[BUFFER_SIZE];
 byte rxpacket[BUFFER_SIZE];
 bool AllTXdone =true;
 bool requestDone=false;
+int ChanSlot=0;
+bool ChanBusy=true;
 byte packetList[255];                            // store packets
 byte pointer;
 float field1=0;
@@ -172,8 +176,8 @@ byte HopsMax=7;  // m
 byte HopUpID =127;    // HopUpID to move trafic up and down 
 byte HopDownID=127;
 byte HopID;
-byte reply =0x00;   // Action 0xFE this node requesting valid time 
-byte Command=0x00;  // master request 
+byte Command=0x00;  // master request
+bool Newsession=true; 
 bool blink;
 bool VEXstateON;
 bool expand=false;  // flip flop expand for sensors that have more than 2 output values
@@ -183,8 +187,7 @@ bool ValidData ; // flag set when a sensor has valid data in Fields varables
 //uint64_t CompassUpdate;
 uint16_t volts;
 uint16_t LastVolts;
-uint16_t LowVoltage=3600;    // normally 3600
-int WakeInterval=1;// wake  exactly intervals past the hour 
+uint16_t LowVoltage=3650;    // normally 3600
 static TimerEvent_t wakeUp;
 static TimerEvent_t DeepSleep;
 static TimerEvent_t sleep;
@@ -195,7 +198,7 @@ float heading;
 uint64_t CompassUpdate;
 bool OLEDwash;    // do a screen clear from last display 
 bool debug=true;     ///**** debug with print statements
-bool debugLED=true;
+bool debugLED=false;
 bool debugGPS=false;
 int SleepCount=0;
 int reboot=0;
@@ -211,7 +214,8 @@ TimerSysTime_t sysTimeCurrent;
 extern volatile unsigned long timer0_millis;
 typedef enum
 {   
-
+    SLEEPWAIT,
+    TX_SLEEP_WAIT,
     WAIT_TX_DONE,
     LOWPOWER,
     RX,
@@ -254,8 +258,10 @@ void setup() {
       Serial.println("Booting from SetUp");
       Serial.println("------------------------------------------");
     }  
-  randomSeed(getBatteryVoltage());
-  CommonBoot();
+  randomSeed(analogRead(GPIO0)); // Create a random seed from floating GPIO pin
+  ChanSlot=random(1,15);
+  SetAwakeTime(1000);  // set sleep timer as awaken from lora interupt or fresh start.
+  NewSession();
 
 }
 
@@ -268,26 +274,37 @@ void loop() {
       HW_Reset(0);
     }
 
-  if (state!=LOWPOWER) // only do things if not in LOWPOWER waiting to sleep else it won't sleep
+  if ((state!=SLEEPWAIT)&&(state!=LOWPOWER)) // only do things if not in LOWPOWER waiting to sleep else it won't sleep
     if  (LowBatTest()==true){
-      if (debug==true){
-        Serial.println(" Low Battery - Going to Sleep ");
+      packetList[0]=0;   //set this pointer to zero to clear transmit buffer list so it only sends one low battery message to network and then sleep until battery recovers
+      if (HopID==0){  // if hopID is zero. Nothing has been heard so far 
+        HopID=120;  // set hopID far away from Base of zero so has best chance of being repeated to network and not lost as a new node with zero hopID.
       }
-      sleepTime=1000*60*30; // sleep for 6 hours for some reason it does not sleep that long***
-      Radio.Sleep();   // turn off Lora radio so no interupts from sleep
-      delay(3000);
-      onSleep();
-    }
+      BuildDataPacket();  // find sensor and build the packet
+      packetApend();      // append it to the send que
+      TXPacket();         // quickly send it before going to sleep to report low battery to network
 
-  if ((millis() - RxLastTime>RXinterval)){ // listening awake time is over so setup for sleep
-         #ifdef hasGPS
-          SendGPS();     // just check if Nothing recieve but send location anyway.
-        #endif
-       // onSleep();
-        }   
+      while(state==WAIT_TX_DONE){  // wait for it to send before going to sleep
+        MyDelay (100);
+      }
+
+     sleepTime=(1000*60*60*6); // sleep for 6 hours if battery low
+
+      if (debug==true){
+        Serial.print(" Low Battery - Going to Sleep ");
+        Serial.print(sleepTime/(1000*60*60));
+        Serial.println(" Hours ");
+      }
+     
+
+      Radio.Sleep();   // turn off Lora radio so no interupts from sleep
+      SetAwakeTime(4000); // Set awake time to sleep the radio
+      state=SLEEPWAIT;  // Do nothing and wait for sleep timer to goto sleep after 4 seconds 
+    }
 
   {
     DoStuff();
+
       feedInnerWdt();    // feed watch dog timer
     Radio.IrqProcess( ); 
 
@@ -297,15 +314,19 @@ void loop() {
 
   switch(state)
 	{
-    
     case TX:
         TXPacket();
         break;
 
 		case RX:
       Radio.Rx( 0 );
-      MyDelay(500);
-      RXhandle();
+      //MyDelay(500);
+      if (AllTXdone==true){ // This has woken into a new session and not just to do a TX
+        TXpacketGet();
+        SetAwakeTime(100);
+        state=SLEEPWAIT;  // Go to sleep waiting for session  end
+        }
+       
         
 			break;
   
@@ -321,6 +342,7 @@ void loop() {
           turnOnRGB(0x111111,0); //white
           if (millis()>GoSleep+100){
             turnOnRGB(0x000000,0); //off
+            VEXToff();  // Turn off vext
             GoSleep=millis();
           }
         }
@@ -336,27 +358,19 @@ void loop() {
 
 void  SendGPS()
   {
-    if (reply==0xA1){  // has valid GPS ready to send
+    if (Device==0xA1){  // has valid GPS ready to send
       if (HopID==0){  // if hopID is zero. Nothing has been heard
         HopID=120;  // set hopID far away from Base of zero
       Serial.println("Sending GPS Location"); 
       BuildDataPacket();
       packetApend();      // append it to the send que
       AllTXdone=false;
-        SetAwakeTime(10000); //give time awake 10 seconds to send gps
+        SetAwakeTime(47000); //give time awake 10 seconds to send gps
       state=TX;
       }
     }
   }
 
-void RXhandle(){
-      if (AllTXdone==false){
-       if ((millis() - TxLastTime>TXinterval)){ // trigger a TX
-        TxLastTime=millis(); 
-        state=TX;
-       }
-      }
-}
 void DoStuff(){
   char c;
   #ifdef GPS_air530
@@ -407,7 +421,7 @@ void DoStuff(){
           field2 = (float)GPS.location.lng();
           field3 = (float)GPS.location.lat(); 
           if ((field2!=0)&&(field3!=0)){
-            reply=0xA1;
+            Device=0xA1;
             ValidData=true;
           }
         #ifdef hasLCD    // Don't turn off GPS. Keep showing track on display
@@ -433,64 +447,61 @@ void DoStuff(){
 
 
 void TXPacket(){
-     
-
-
-        TXpacketGet();
-        if (AllTXdone==false){
 
         TxNodeIDPrint();    // display the TX packet ID 
         feedInnerWdt();    // feed watch dog timer Next bit of code could get stuck here if radio busy
-          uint32_t WaitTimeout=millis()+10000; // 5 second timeout
+          uint32_t WaitTimeout=millis()+40000; // 5 second timeout
+          ChanBusy=false;
        while (!Radio.IsChannelFree( MODEM_LORA,RF_FREQUENCY , lowestRSSI, LORA_SPREADING_FACTOR*100)&&(millis()<WaitTimeout))  // wait for channel to be free
         {
-            feedInnerWdt();    // feed watch dog timer
-            MyDelay(10);   // wait 10ms before checking again
-        
-        if (debugLED==true){
-            if (debug==true){
+           SetAwakeTime(5000); // keep awake while channel busy
+          ChanSlot=random(1,15);
+          ChanBusy=true;
+            MyDelay(TxLength); // use normal delay so as not to update WDT timer
+        if (debug==true){
                 Serial.print("X");
-              
             }
+        if (debugLED==true){
             turnOnRGB(0x111100,0); //yellow
-            SetAwakeTime(10000); // keep awake until this TX is sent 10 seconds should be enough
-            MyDelay(random(20,1000)); // use normal delay so as not to update WDT timer
-            turnOnRGB(0x000000,0); //off
           } 
         }
 
 
       
         if (debug==true){
+          Serial.print("Slot:");
+          Serial.print (ChanSlot);
+          Serial.print("       ");
           TXPacketPrint();
         }
-        
         if (!Radio.IsChannelFree( MODEM_LORA,RF_FREQUENCY , lowestRSSI, LORA_SPREADING_FACTOR*100)){
-        lowestRSSI=99; // reset lowest because it got stuck as channel busy
+        lowestRSSI=lowestRSSI+1; // reset lowest because it got stuck as channel busy
+        SetAwakeTime(5000); // keep awake while channel busy
+        MyDelay(TxLength);
         }
 
        if (debugLED==true){
           turnOnRGB(0x110000,0); //red
-        }  
+        }
+      SetAwakeTime(10000); // 
+      TxStartTime=millis(); //measure the length of a Transmit to calculate slot time length
        Radio.Send( (uint8_t *)txpacket,18); // *** packet length is 18 
        state=WAIT_TX_DONE;
-       }
-       else{
-        state=RX;  // nothing to send so back to listening
-       }
       }
 
 
 void OnTxDone( void )
 { 
-      if (debugLED==true){
+    TxLength=(millis()-TxStartTime)+100;
+    VEXToff();  // Turn off vext as Lora leaves it on  
+    if (debugLED==true){
           turnOnRGB(0,0);
+          VEXToff();  // Turn off vext
+          
       }
-      RxLastTime=millis();
-      TXinterval=random(3000,15000);
-      TxLastTime=millis();
       Radio.Sleep();
       state=RX;  // make sure it returns to loop
+      AllTXdone=true;
 }
 
 void OnTxTimeout( void )
@@ -499,34 +510,24 @@ void OnTxTimeout( void )
     Serial.println("  ****  TX Timed out *****");
     }
     state=RX;
-    RxLastTime=millis();
-    TXinterval=random(1500,15000);
-    TxLastTime=millis();
-    state=RX;
- 
-
+    AllTXdone=true;
 }
 
 void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
 {   
+    Newsession=false;  // reset new session flag as we have had comunication so not a new session anymore
     innerWdtEnable(true);   //  set inner watchdog to manual feeding 
     SetAwakeTime(6000);  // set sleep timer as awaken from lora interupt or fresh start. 
-    if (AllTXdone==false){  //if not or complete add another 40 seconds to awake to to clear TX buffer
-      SetAwakeTime(40000);
-    }
     Radio.Sleep();
     rxSize=size;
     if (debugLED==true){
       turnOnRGB(0x001100,0); //green
       MyDelay(30);
       turnOnRGB(0,0);
+      VEXToff(); 
     }
     
     if (rxSize==18){  // found a potential node packet
-        RXinterval=30000;  // reset listening time
-        TXinterval=random(1500,15000);
-        TxLastTime=millis();     
-        state=RX;     // make sure it gets back into loop
         SNR=snr;
       
       RSSI=rssi;
@@ -559,9 +560,9 @@ void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
             requestDone=true;
         }
         if ((cmd= 0xFF)&&(requestDone==false))  { // only devices with valid data (devices attached send data). Just be a repeater only
-        
+          if (ValidData==false){
             SearchSence();  
-      
+          }
             if (ValidData==true){
             BuildDataPacket();  // build the packet
             packetApend();      // append it to the send que
@@ -628,6 +629,13 @@ void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
      
       
     }
+    if(AllTXdone==false){ // Device has woken while waiting for a TX due recieving another packet
+      state=TX_SLEEP_WAIT;  // go back to sleep waiting for TX to complete
+    }
+    else {
+      state=RX;  // go back to RX waiting for next packet
+    }
+    SetAwakeTime(100);  // set sleep timer to wait for TX to complete before sleeping 
   }
 
 
@@ -644,11 +652,11 @@ void BuildDataPacket(){   // Build data packet
       rxpacket[i]=aStr[i];
     }
     rxpacket[6]=(HopID | B10000000); // This nodes HopUpID and set bit 7 as direction towards master
-    if ((ValidData==false)&&(reply<128)){
-      reply=0;   // zero as the Data is invalid for a i2c sensor
+    if ((ValidData==false)&&(Device<128)){
+      Device=0;   // zero as the Data is invalid for a i2c sensor
 }
-    rxpacket[7]=reply;  // action is sensor type
-     if (reply==0xA1){      // this is a GPS device so send SNR and not battery voltage
+    rxpacket[7]=Device;  // action is sensor type
+     if (Device==0xA1){      // this is a GPS device so send SNR and not battery voltage
         field1=float(SNR);  // just add the SNR  long/lat fields already filled
         }
     int16ToChar(bStr, field1); // two bytes of voltage
@@ -664,7 +672,7 @@ void BuildDataPacket(){   // Build data packet
     for (int i=0;i<4;++i) {
       rxpacket[14+i]=cStr[i];
     }
-    if (reply==0){    // inject my loction clear text SN34LY-19
+    if (Device==0){    // inject my loction clear text SN34LY-19
       rxpacket[10]=0x53;
       rxpacket[11]=0x4E;
       rxpacket[12]=0x33;
@@ -698,7 +706,6 @@ void TXpacketGet(){
           pointer++;
         }
         AllTXdone=false;
-        SetAwakeTime(40000);// don't sleep yet waiting to do a TX
         return;
       }
     
@@ -708,8 +715,6 @@ void TXpacketGet(){
 
   TXsize=0;
  AllTXdone=true;
- SetAwakeTime(6000);  // nothing more to send so go to sleep
-
 }
 
 void packetApend(){
@@ -723,13 +728,13 @@ void packetApend(){
   pointer++; // Now pointing at TX RX count
   pointer++; // Now pointing at Data
   for (int i=0;i<18;++i) {
-    if ((packetList[BasePoint+pointer]!=rxpacket[i])&&(i<6)){  // Compare only the Chip ID
+    if ((packetList[BasePoint+pointer]!=rxpacket[i])&&(i!=6)){  // Compare the packet data except for byte [6] which is the changing hop count
       match=false;
     }
     pointer++;
   }
    if (match==true) {                    // packet already in list don't append just add recieved count and return
-    //packetList[BasePoint+1]++;
+
     return;
    }
   
@@ -739,6 +744,7 @@ void packetApend(){
   }
   if (BasePoint+18>254){
     if (debug==true){
+    Serial.print("");
     Serial.println("Buffer is full");
     }
     return;        // if buffer full do not append
@@ -754,8 +760,9 @@ void packetApend(){
     pointer++;
   }
   packetList[BasePoint+pointer]=0;   // End terminated ready for appending
-  AllTXdone=false;
-  SetAwakeTime(40000);// don't sleep yet waiting to do a TX
+    if (state!=TX_SLEEP_WAIT){// TX already pending after sleep so don't change state if already pending
+      state=RX;
+    }
 }
 
 void RxNodeIDPrint(){
@@ -1012,11 +1019,11 @@ void DataPrint(int device, float field1,float field2,float field3){
   case 0x01: {// reply code for volts temperature humidity 
       Serial.print(" Battery:");
       Serial.println((float)field1/1000);
-      Serial.print(" :TX-Temperature: ");
+      Serial.print(" T=");
       Serial.print(field2);
-      Serial.write("\xC2\xB0"); //The Degree symbol
+      Serial.write("\xC2\xB0"); //The Degree symbol 
       Serial.print("C");
-      Serial.print(" :TX-Humidity   : ");
+      Serial.print(" Humidity=");
       Serial.print(field3);
       Serial.print("%");
 
@@ -1034,10 +1041,10 @@ void DataPrint(int device, float field1,float field2,float field3){
       Serial.print(" Battery:");
       Serial.print((float)field1/1000);
       Serial.print(" Partical Sensor ");
-      Serial.print(" :PM2.5 ");
+      Serial.print(" PM2.5=");
       Serial.print(field2);
       
-      Serial.print(" :PM1.0 ");
+      Serial.print(" PM1.0=");
       Serial.print(field3);
       break;
     }
@@ -1047,7 +1054,7 @@ void DataPrint(int device, float field1,float field2,float field3){
       Serial.print(" Battery:");
       Serial.print((float)field1/1000);
       Serial.print(" :0x23 -- BH1750 light sensor");
-      Serial.print(":Light: ");
+      Serial.print(" :Light=");
       Serial.print(field2);
       Serial.print(" lx");
       break;
@@ -1056,10 +1063,12 @@ void DataPrint(int device, float field1,float field2,float field3){
     {
       Serial.print(" Battery:");
       Serial.print((float)field1/1000);
-      Serial.println(" :HDC1080 temperature and humidity sensor");
-      Serial.print(" :T=");
+      Serial.println(" :HDC1080 Sensor");
+      Serial.print(" T=");
       Serial.print(field2);
-      Serial.print(" :C, RH=");
+      Serial.write("\xC2\xB0"); //The Degree symbol
+      Serial.print("C ");
+      Serial.print(" RH=");
       Serial.print(field3);
       Serial.print("%");
       }
@@ -1069,9 +1078,11 @@ void DataPrint(int device, float field1,float field2,float field3){
       Serial.print(" Battery:");
       Serial.print((float)field1/1000);
       Serial.print(" :AHT10 Sensor");
-      Serial.print(" :T=");
+      Serial.print(" T=");
       Serial.print(field2);
-      Serial.print(" :C, RH=");
+       Serial.write("\xC2\xB0"); //The Degree symbol
+      Serial.print("C");
+      Serial.print(" RH=");
       Serial.print(field3);
       Serial.print("%");
       }
@@ -1082,10 +1093,10 @@ void DataPrint(int device, float field1,float field2,float field3){
       Serial.print(" Battery:");
       Serial.print((float)field1/1000);
       Serial.print(" CCS811 Air quality sensor ");
-      Serial.print(" :CO2 ");
+      Serial.print(" CO2=");
       Serial.print(field2);
-      Serial.print("ppm");
-      Serial.print(" :TVOC");
+      Serial.print(" ppm");
+      Serial.print(" TVOC=");
       Serial.print(field3);
       Serial.print("ppb");
       break;  
@@ -1096,10 +1107,10 @@ void DataPrint(int device, float field1,float field2,float field3){
       Serial.print(" Battery:");
       Serial.print((float)field1/1000);
   
-      Serial.print(" Humidity: ");
+      Serial.print(" RH=");
       Serial.print(field2);
       Serial.print("% "); //The Degree symbol
-      Serial.print(" Pressure: ");
+      Serial.print(" Pressure=");
       Serial.print(field3/100);
       Serial.print("hPa");
       break;
@@ -1108,11 +1119,24 @@ void DataPrint(int device, float field1,float field2,float field3){
        Serial.print(" Battery:");
       Serial.print((float)field1/1000); 
     
-      Serial.print(" TX-Temperature: ");
+      Serial.print(" T=");
       Serial.print(field2);
       Serial.write("\xC2\xB0"); //The Degree symbol
       Serial.print("C ");
-      Serial.print(" TX-Pressure: ");
+      Serial.print("Pressure=");
+      Serial.print(field3/100);
+      Serial.print("hPa");
+      break;
+  }
+  case 0x77: {// reply device address for volts temperature humidity 
+       Serial.print(" Battery:");
+      Serial.print((float)field1/1000); 
+    
+      Serial.print(" T=");
+      Serial.print(field2);
+      Serial.write("\xC2\xB0"); //The Degree symbol
+      Serial.print("C ");
+      Serial.print("Pressure=");
       Serial.print(field3/100);
       Serial.print("hPa");
       break;
@@ -1177,11 +1201,13 @@ void DataPrint(int device, float field1,float field2,float field3){
 
 
 void onSleep()
-{
+{  
+
   if (debugLED==true){
           turnOnRGB(0x000011,0); //flash led blue before sleep
           MyDelay(30);
           turnOnRGB(0,0);
+          VEXToff();  // Turn off vext
           MyDelay(30);
         }
   #ifdef GPS_Serial1
@@ -1203,23 +1229,29 @@ void onSleep()
   iicSerial1.print("$PGKC105,8*3F\r\n");
   VEXToff();
 #endif
- // OLEDsleep();  // draw on screen
-  //turnOffRGB();
- // Radio.Rx(0);
+ 
        #ifdef hasLCD
           OLEDsleep();
           sleepTime=1; // if there is LCD then just run it flat 
       #endif
+       if (AllTXdone==false){  // if there is still a TX to do so sleep for chan slot time  
+       
+          sleepTime=ChanSlot*TxLength; // sleep for the remainder of the slot time     
+      }
+      else 
+      {
+        sleepTime=33000; // sleep  wait for next session
+         } 
+        
 
       if (debug==true){
-        Serial.println("");
-        Serial.print("VOLTS=");
-        Serial.print((float)volts/1000);
-        Serial.print("   Try to Sleep for ");
-        Serial.print (sleepTime/1000);
-        Serial.println(" seconds");
-        Serial.println("----------------SLEEP----------------");
-        MyDelay(100);
+        //Serial.println("");
+       // Serial.print(" Sleep for: ");
+        //Serial.print (sleepTime/1000);
+       // Serial.print(" seconds ");
+       // Serial.print("VOLTS=");
+       // Serial.print((float)volts/1000);
+        delay(100); // just to make sure all the above prints out before we turn off serial
       }
         Serial.flush();
        // Serial.end();
@@ -1234,8 +1266,8 @@ void onSleep()
         // put this here because V1 carry on and don't actulally run from onwake
       TimerInit( &wakeUp, onWake );
       TimerSetValue( &wakeUp, sleepTime);
-      sleepTime=40000;    // sleep for 40 seconds. If it wakes in that time the session still active 
       TimerStart( &wakeUp );
+      VEXToff();   
       state=LOWPOWER;
       GoSleep=millis();
 }
@@ -1247,9 +1279,25 @@ void SetAwakeTime(uint32_t sleepTime){
 }
 
 void onWake(){
+TimerStop(&sleep);
+TimerStop(&wakeUp);
+VEXToff();
+innerWdtEnable(true);   //  set inner watchdog to manual feeding
+sleepTime=1000*60*60;  // New seesion started so go to sleep for an hour until woke from RX interrupts
+SetAwakeTime(33000);  // set sleep timer as awaken from lora interupt or fresh start. 
+if (AllTXdone==true){
+  state=RX;
+}
+else {
+  state=TX;
+}
+
+Radio.Rx(0);
+
   if (debug==true||debugGPS==true){
     Serial.begin(115200);
   }
+
   if (debugLED==true){
           turnOnRGB(0x000011,0); //flash led blue on wake
           MyDelay(30);
@@ -1258,13 +1306,12 @@ void onWake(){
           turnOnRGB(0x110000,0); //flash led red on wake
           MyDelay(30); 
           turnOnRGB(0,0);
+          VEXToff();  // Turn off vext
         }
-  if (debug==true){ 
-    Serial.println("----------------WAKE-----------------");
-  }
+if ((AllTXdone==true)){ // This has woken into a new session and not just to do a TX
+  NewSession(); 
+}
 
-   
-CommonBoot(); 
 }
 
 bool LowBatTest(){
@@ -1279,37 +1326,27 @@ bool LowBatTest(){
   return false;
 }
   
-void  CommonBoot(){
-  TimerStop(&sleep);
-  TimerStop(&wakeUp);
-if (debugLED==true){
-          turnOnRGB(0x000011,0); //flash led blue to show not woken from Lora interrupts
-          MyDelay(30);
-
-           turnOnRGB(0x001111,0); //flash purple to show woken from lora interrupts
-          MyDelay(30);
-          turnOnRGB(0,0);
-        }
-
-
-  if (millis()>1000*60*60*23){  // reboot every 23 hours to clear memory leaks
-    HW_Reset(0);
-  }
-
+void  NewSession(){
+  Newsession=true;
   reboot++;
-  if (reboot==50){
+  if ((reboot>50)){
     HW_Reset(0);     //do a reboot to clear out any crap and  make a fresh start
   }
-  
-  Radio.Rx(0);  // set Lora to receive mode
-  innerWdtEnable(true);   //  set inner watchdog to manual feeding 
+  if (debug==true){
+    Serial.println("");
+    Serial.print("----New Session---- ");
+    Serial.print(reboot);
+    TXchipID=getID(); 
+    Serial.printf(" ChipID:%04X%08X",(uint32_t)(TXchipID>>32),(uint32_t)TXchipID); 
+  }
+  randomSeed(analogRead(GPIO0)); // Create a random seed from floating GPIO pin
   volts=getBatteryVoltage();
   field1=volts;
   field2=0;
   field3=0;
   SleepCount=0;
   pinMode(GPIO4, OUTPUT);
-  //pinMode(GPIO7, OUTPUT);
+  //pinMode(GPIO6, OUTPUT);
   pinMode(Vext, OUTPUT);
   //digitalWrite(GPIO7,HIGH); // turn on 3.3V for LoRa
   //VEXToff();   // it wakes up on so turn off until needed
@@ -1339,36 +1376,16 @@ if (debugLED==true){
     Serial1.printf("$PGKC105,8*3F\r\n"); // automatic power save mode wake on serial
   #endif
   ValidData=false;
-  if (debug==true){
-    TXchipID=getID(); 
-    Serial.printf("This ChipID:%04X%08X",(uint32_t)(TXchipID>>32),(uint32_t)TXchipID); 
-    Serial.println();
-    Serial.print("Common Boot Volts:");
-    Serial.println((float)volts/1000);
-  }
 // new session so clear all variables for hop management
 requestDone=false;
 HopUpID=127;   // set this to highest it can be for this session
 HopDownID=127; 
 HopID=0;
 packetList[0]=0; //set this pointer to zero to clear transmit buffer list 
-AllTXdone=false;
-lowestRSSI=99;
-
 Radio.Rx(0);  // set Lora to receive mode
-RXinterval= map(constrain(volts,LowVoltage,4220),LowVoltage,4220,15000,300000);   // time sync lost so sleep for between 15 seconds  and 2 minutes
-sleepTime=1000*60*5;  // default sleep time 8 hours
-      SetAwakeTime(6000);  // set sleep timer as awaken from lora interupt or fresh start. 
       #ifdef hasLCD  //keep listening for 1hr as has LCD
-      RXinterval=1000*30;
-    #endif
-      //RXinterval=60000; //listen for 60 seconds
-       //TimerSetValue( &sleep, RXinterval); 
-    RxLastTime = millis();            // timestamp the message    
-    TxLastTime=millis();
-    TXinterval=RXinterval/2;
-    state=RX;
-    
+      SetawakeTime(1000*60)
+    #endif   
    //pwm period can be 0xFF~0xFFFF, default is 0xFFFF
   setPWM_ComparePeriod(0xFFFF);
   setPWM_Frequency(PWM_CLK_FREQ_48M);
@@ -1397,8 +1414,8 @@ if (field3==0){        // error reading third time lucky
     //digitalWrite(GPIO0,HIGH);//set HiIGH GPIO0 to disable CCS811
 }
 void SearchSence(){
+  SetAwakeTime(40000); // keep device awake while searching for i2c devices and reading them
 expand=!expand; // flip expand mode for BME280 for reading temp and pressure or humidity and pressure
-byte reply=0;
 VEXTon();   // time in syn so turn on vext ready to read I2C devices as normal 
 digitalWrite(GPIO4,HIGH);
   MyDelay(5000); // give time for partical sensor to spin up and report correct address
@@ -1407,14 +1424,14 @@ digitalWrite(GPIO4,HIGH);
 
   if (debug==true){
     Serial.println("");
-    Serial.print("Scan complete ");
-    Serial.println(address);
+    Serial.print("Device Found at Address: 0x");
+    Serial.print(Device,HEX);
     }
   
-  reply=address;   // set the action for the type of device found
+  Device;   // set the action for the type of device found
   }
 
-  switch(reply)
+  switch(Device)
   {
     
 
@@ -1431,7 +1448,7 @@ digitalWrite(GPIO4,HIGH);
     
     case 0x12: //0x12 -- Partical sensor
     {
-      turnOnRGB(0x111100,0); //yellow
+      SetAwakeTime(47000); // keep device awake while while waiting to suck in air and get a reading
       MyDelay(6000);   // suck in lots of air
       if(aqi.read(&aqidata)) {
         field1=volts;
@@ -1442,7 +1459,7 @@ digitalWrite(GPIO4,HIGH);
         VEXToff(); // all done, turn off power
       break;
     }
-    case 35: //0x23 -- BH1750 light sensor
+    case 0x23: //-- BH1750 light sensor
     {
       field2 = lightMeter.readLightLevel();
       ValidData=true;
@@ -1463,7 +1480,7 @@ digitalWrite(GPIO4,HIGH);
       break;
     }
   
-    case 0x76: //0x76 -- BME280 Barometer temperature Humidity Fake Module should be 0x77
+    case 0x76: //-- BME280 Barometer temperature Humidity Fake Module should be 0x77
     {         // Needed to swap 0x77 with 0x76 in adafruitBME280.h to get to work
     
       BME280.begin(Bme280TwoWireAddress::Primary);
@@ -1475,15 +1492,16 @@ digitalWrite(GPIO4,HIGH);
 
       }
       else{
-       reply=0x75;  // change the device code as if it was another device that just reads Humidity and pressure
+       Device=0x75;  // change the device code as if it was another device that just reads Humidity and pressure
         field2 =BME280.getHumidity() ;
       }
       field3 =BME280.getPressure() ; 
       ValidData=true;
       if(isnan(field3)){  // check for failed result in pressure field3
-        reply=0;
         ValidData=false;
-        Serial.println("Failed to read correctly BM280. Dumping data");
+        if (debug==true){
+          Serial.println("Failed to read correctly BM280");
+        }
       }
       VEXToff(); // all done, turn off power
       break;
@@ -1491,17 +1509,23 @@ digitalWrite(GPIO4,HIGH);
 
     case 0x77: //0x77 -- BMP280 Barometer sensor
     {
-      bmp280.begin(0x77);
-      MyDelay(500);
-      field2 =bmp280.readTemperature() ; 
-      field3 =bmp280.readPressure(); 
+     spa.begin();
+      spa.setPressureConfig(SPL07_4HZ, SPL07_1SAMPLE);
+    spa.setTemperatureConfig(SPL07_4HZ, SPL07_1SAMPLE);
+  MyDelay(100);
+
+  // Set SPL07-003 to continuous measurements
+  spa.setMode(SPL07_ONE_PRESSURE);
+  spa.setMode(SPL07_ONE_TEMPERATURE);
+          field2 = spa.readTemperature();
+          field3 = spa.readPressure();
       ValidData=true;
       VEXToff();
       //digitalWrite(Vext,HIGH); // all done, turn off power
       break;
     }
 
-    case 64: //0x40 -- HDC1080 temperature and humidity sensor
+    case 0x40: //-- HDC1080 temperature and humidity sensor
     {
       hdc1080.begin(0x40);
       field2=hdc1080.readTemperature();
@@ -1511,7 +1535,7 @@ digitalWrite(GPIO4,HIGH);
       break;
     }
     
-    case 90: //0x5a -- CCS811 Air quality sensor
+    case 0x5A: //-- CCS811 Air quality sensor
       {
       ccs.begin(0x5A);
       while(!ccs.available()){
@@ -1543,16 +1567,12 @@ void I2C_Scan()
   I2C_Stop();   // this resets the wire() http://community.heltec.cn/t/cubecell-vext-with-i2c-sensors/886
   Wire.begin();
   Wire.setClock(10000);
-  if (debug==true){
-  Serial.println("");
-  Serial.println("Scanning I2C");
-  }
   byte error;
   int nDevices;
   
-  for(address = 1; address < 127; address++ ) // normally starts at 1 
+  for(Device = 1; Device < 127; Device++ ) // normally starts at 1 
   {
-    Wire.beginTransmission(address);
+    Wire.beginTransmission(Device);
 
     error = Wire.endTransmission();
 
@@ -1587,8 +1607,8 @@ void updateCompass()
     MyDisplay.setColor(WHITE);
     int Kmph=int(GPS.speed.kmph());
     if (Kmph>3){
-      RXinterval=30000; // set to fast update when moving
-      SetSleepTime(RXinterval);  // set sleep timer
+
+      SetSleepTime(30000);  // set sleep timer
       int index = sprintf(str,"%dKm/h",Kmph);
     
     str[index] = 0;
@@ -1706,6 +1726,7 @@ double toRadians(double degrees){
 
 void VEXTon(){
     digitalWrite(Vext, LOW); // turn on power to the sensor
+    //digitalWrite(GPIO6,LOW);
     VEXstateON=true;
     MyDelay(500); 
 
@@ -1713,6 +1734,7 @@ void VEXTon(){
 void VEXToff(){
     MyDelay(500);
     digitalWrite(Vext,HIGH); // turn off power to the sensor
+   // digitalWrite(GPIO6,HIGH);
     VEXstateON=false;
     
 

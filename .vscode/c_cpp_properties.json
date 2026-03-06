@@ -35,7 +35,6 @@
                 "C:/Users/andre/.platformio/packages/framework-arduinocubecell/cores/asr650x/Wire",
                 "C:/Users/andre/.platformio/packages/framework-arduinocubecell/cores/asr650x/SPI",
                 "C:/Users/andre/.platformio/packages/framework-arduinocubecell/variants/CubeCell-Board-V2",
-                "c:/Users/andre/Documents/PlatformIO/Projects/HeltecLoraMesh/.pio/libdeps/cubecell_board/Unity/src",
                 "C:/Users/andre/.platformio/packages/framework-arduinocubecell/libraries/Basics/src",
                 "C:/Users/andre/.platformio/packages/framework-arduinocubecell/libraries/EEPROM",
                 "C:/Users/andre/.platformio/packages/framework-arduinocubecell/libraries/LoRaWanMinimal/src",
@@ -73,7 +72,6 @@
                     "C:/Users/andre/.platformio/packages/framework-arduinocubecell/cores/asr650x/Wire",
                     "C:/Users/andre/.platformio/packages/framework-arduinocubecell/cores/asr650x/SPI",
                     "C:/Users/andre/.platformio/packages/framework-arduinocubecell/variants/CubeCell-Board-V2",
-                    "c:/Users/andre/Documents/PlatformIO/Projects/HeltecLoraMesh/.pio/libdeps/cubecell_board/Unity/src",
                     "C:/Users/andre/.platformio/packages/framework-arduinocubecell/libraries/Basics/src",
                     "C:/Users/andre/.platformio/packages/framework-arduinocubecell/libraries/EEPROM",
                     "C:/Users/andre/.platformio/packages/framework-arduinocubecell/libraries/LoRaWanMinimal/src",
@@ -83,7 +81,7 @@
                 ]
             },
             "defines": [
-                "PLATFORMIO=60118",
+                "PLATFORMIO=60119",
                 "CubeCell_Board_V2",
                 "ARDUINO=10815",
                 "ARDUINO_ARCH_ASR650X",
