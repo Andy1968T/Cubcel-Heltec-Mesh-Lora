@@ -198,7 +198,7 @@ float heading;
 uint64_t CompassUpdate;
 bool OLEDwash;    // do a screen clear from last display 
 bool debug=true;     ///**** debug with print statements
-bool debugLED=false;
+bool debugLED=true;
 bool debugGPS=false;
 int SleepCount=0;
 int reboot=0;
@@ -215,9 +215,10 @@ extern volatile unsigned long timer0_millis;
 typedef enum
 {   
     SLEEPWAIT,
+    LOWPOWER,
     TX_SLEEP_WAIT,
     WAIT_TX_DONE,
-    LOWPOWER,
+    LOWBATTERY,
     RX,
     TX
 }
@@ -274,41 +275,35 @@ void loop() {
       HW_Reset(0);
     }
 
-  if ((state!=SLEEPWAIT)&&(state!=LOWPOWER)) // only do things if not in LOWPOWER waiting to sleep else it won't sleep
-    if  (LowBatTest()==true){
-      packetList[0]=0;   //set this pointer to zero to clear transmit buffer list so it only sends one low battery message to network and then sleep until battery recovers
-      if (HopID==0){  // if hopID is zero. Nothing has been heard so far 
-        HopID=120;  // set hopID far away from Base of zero so has best chance of being repeated to network and not lost as a new node with zero hopID.
+      if((state!=LOWPOWER)&&(state!=LOWBATTERY)){  // if not already in low power mode then check battery and go to sleep if low
+        if  (LowBatTest()==true){
+          if (debug==true){
+          Serial.println("");
+          Serial.println("LOw Battery quickly send barttery level and sleep");
+        
+          }
+          packetList[0]=0;   //set this pointer to zero to clear transmit buffer list so it only sends one low battery message to network and then sleep until battery recovers
+          if (HopID==0){  // if hopID is zero. Nothing has been heard so far 
+            HopID=120;  // set hopID far away from Base of zero so has best chance of being repeated to network and not lost as a new node with zero hopID.
+          }
+          BuildDataPacket();  // find sensor and build the packet
+          packetApend();      // append it to the send que
+          TXpacketGet();
+          TXPacket();         // quickly send it before going to sleep to report low battery to network
+         while (state==WAIT_TX_DONE){  // wait for TX to complete before going to sleep
+          MyDelay(1000);  // use normal delay so as not to update WDT timer
+          }
+            Radio.Sleep();   // turn off Lora radio so no interupts from sleep
+            MyDelay(4000);  // delay to allow radio to sleep
+            SetAwakeTime(100); // Set awake time to sleep the radio
+            state=LOWBATTERY;  // Do nothing and wait for sleep timer to goto sleep after 4 seconds 
+          }
       }
-      BuildDataPacket();  // find sensor and build the packet
-      packetApend();      // append it to the send que
-      TXPacket();         // quickly send it before going to sleep to report low battery to network
 
-      while(state==WAIT_TX_DONE){  // wait for it to send before going to sleep
-        MyDelay (100);
-      }
-
-     sleepTime=(1000*60*60*6); // sleep for 6 hours if battery low
-
-      if (debug==true){
-        Serial.print(" Low Battery - Going to Sleep ");
-        Serial.print(sleepTime/(1000*60*60));
-        Serial.println(" Hours ");
-      }
-     
-
-      Radio.Sleep();   // turn off Lora radio so no interupts from sleep
-      SetAwakeTime(4000); // Set awake time to sleep the radio
-      state=SLEEPWAIT;  // Do nothing and wait for sleep timer to goto sleep after 4 seconds 
-    }
-
-  {
     DoStuff();
-
-      feedInnerWdt();    // feed watch dog timer
+    feedInnerWdt();    // feed watch dog timer
     Radio.IrqProcess( ); 
 
-  }
  
   
 
@@ -450,14 +445,20 @@ void TXPacket(){
 
         TxNodeIDPrint();    // display the TX packet ID 
         feedInnerWdt();    // feed watch dog timer Next bit of code could get stuck here if radio busy
-          uint32_t WaitTimeout=millis()+40000; // 5 second timeout
+          uint32_t WaitTimeout=millis()+20000; // 5 second timeout
           ChanBusy=false;
+           if (debug==true){
+          Serial.print("  Slot:");
+          Serial.print (ChanSlot);
+          Serial.print("       ");
+          TXPacketPrint();
+        }
        while (!Radio.IsChannelFree( MODEM_LORA,RF_FREQUENCY , lowestRSSI, LORA_SPREADING_FACTOR*100)&&(millis()<WaitTimeout))  // wait for channel to be free
         {
            SetAwakeTime(5000); // keep awake while channel busy
           ChanSlot=random(1,15);
           ChanBusy=true;
-            MyDelay(TxLength); // use normal delay so as not to update WDT timer
+            MyDelay(TxLength); 
         if (debug==true){
                 Serial.print("X");
             }
@@ -466,27 +467,23 @@ void TXPacket(){
           } 
         }
 
-
-      
-        if (debug==true){
-          Serial.print("Slot:");
-          Serial.print (ChanSlot);
-          Serial.print("       ");
-          TXPacketPrint();
-        }
         if (!Radio.IsChannelFree( MODEM_LORA,RF_FREQUENCY , lowestRSSI, LORA_SPREADING_FACTOR*100)){
         lowestRSSI=lowestRSSI+1; // reset lowest because it got stuck as channel busy
         SetAwakeTime(5000); // keep awake while channel busy
         MyDelay(TxLength);
+        if (debug==true){
+                Serial.print("x");
+            }
         }
 
        if (debugLED==true){
           turnOnRGB(0x110000,0); //red
         }
+
       SetAwakeTime(10000); // 
       TxStartTime=millis(); //measure the length of a Transmit to calculate slot time length
        Radio.Send( (uint8_t *)txpacket,18); // *** packet length is 18 
-       state=WAIT_TX_DONE;
+      state=WAIT_TX_DONE;
       }
 
 
@@ -499,7 +496,7 @@ void OnTxDone( void )
           VEXToff();  // Turn off vext
           
       }
-      Radio.Sleep();
+      Radio.Rx(0);  // go back to RX continus
       state=RX;  // make sure it returns to loop
       AllTXdone=true;
 }
@@ -518,7 +515,6 @@ void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
     Newsession=false;  // reset new session flag as we have had comunication so not a new session anymore
     innerWdtEnable(true);   //  set inner watchdog to manual feeding 
     SetAwakeTime(6000);  // set sleep timer as awaken from lora interupt or fresh start. 
-    Radio.Sleep();
     rxSize=size;
     if (debugLED==true){
       turnOnRGB(0x001100,0); //green
@@ -551,7 +547,7 @@ void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
         packetApend();   // pass request on 
         int cmd=rxpacket[7];
 
-        if ((cmd= 0xFC)&&(requestDone==false)) {// all devices send their devis data
+        if ((cmd==0xFC)&&(requestDone==false)) {// all devices send their devis data
           if (ValidData==false){
             SearchSence();     // find sensor data and save it in fields
           }
@@ -559,20 +555,21 @@ void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
             packetApend();      // append it to the send que
             requestDone=true;
         }
-        if ((cmd= 0xFF)&&(requestDone==false))  { // only devices with valid data (devices attached send data). Just be a repeater only
+        if ((cmd==0xFF)&&(requestDone==false))  { // only devices with valid data (devices attached send data). Just be a repeater only
           if (ValidData==false){
             SearchSence();  
           }
             if (ValidData==true){
             BuildDataPacket();  // build the packet
             packetApend();      // append it to the send que
+            requestDone=true; 
           }
-        requestDone=true;  
+        
       }
 
 
-        if ((cmd= 0xFB)&&(requestDone==false))
-         {// only matched device send data
+        if ((cmd==0xFB)&&(requestDone==false))// only matched device send data
+         {
          
           bool matched=true;
           byte aStr[8]={0};
@@ -586,8 +583,9 @@ void OnRxDone( uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr )
               SearchSence();     // find sensor data and save it in fields
               BuildDataPacket();  // find sensor and build the packet
               packetApend();      // append it to the send que
+              requestDone=true;
           }
-         requestDone=true; 
+  
         }  
       }
 
@@ -749,7 +747,6 @@ void packetApend(){
     }
     return;        // if buffer full do not append
   }
-
   packetList[BasePoint+pointer]= 20;
   pointer++;
   packetList[BasePoint+pointer]=1; // retransmit recieved packet once
@@ -1132,7 +1129,7 @@ void DataPrint(int device, float field1,float field2,float field3){
        Serial.print(" Battery:");
       Serial.print((float)field1/1000); 
     
-      Serial.print(" T=");
+      Serial.print(" SPA06 Sensor T=");
       Serial.print(field2);
       Serial.write("\xC2\xB0"); //The Degree symbol
       Serial.print("C ");
@@ -1234,15 +1231,25 @@ void onSleep()
           OLEDsleep();
           sleepTime=1; // if there is LCD then just run it flat 
       #endif
+      if(state==LOWBATTERY){  // if we are already in low power mode then we must have woken to do a TX but battery is low so go back to sleep for a long time
+        sleepTime=1000*60*60*6; // sleep for 6 hours if battery low and woken for a TX as there is no point doing the TX if battery is low
+        if (debug==true){
+          Serial.println("");
+          Serial.print(" Low Battery - Going to Sleep ");
+          Serial.print(sleepTime/(1000*60*60));
+          Serial.println(" Hours ");
+        }
+      } 
+      else {
+
        if (AllTXdone==false){  // if there is still a TX to do so sleep for chan slot time  
-       
-          sleepTime=ChanSlot*TxLength; // sleep for the remainder of the slot time     
+       sleepTime=ChanSlot*TxLength; // sleep for the remainder of the slot time     
       }
       else 
       {
         sleepTime=33000; // sleep  wait for next session
          } 
-        
+        }
 
       if (debug==true){
         //Serial.println("");
@@ -1328,6 +1335,7 @@ bool LowBatTest(){
   
 void  NewSession(){
   Newsession=true;
+  requestDone=false;
   reboot++;
   if ((reboot>50)){
     HW_Reset(0);     //do a reboot to clear out any crap and  make a fresh start
@@ -1386,10 +1394,6 @@ Radio.Rx(0);  // set Lora to receive mode
       #ifdef hasLCD  //keep listening for 1hr as has LCD
       SetawakeTime(1000*60)
     #endif   
-   //pwm period can be 0xFF~0xFFFF, default is 0xFFFF
-  setPWM_ComparePeriod(0xFFFF);
-  setPWM_Frequency(PWM_CLK_FREQ_48M);
-   pinMode(PWM2,OUTPUT);
 
   #ifdef hasLCD
    OLEDwake();
@@ -1775,3 +1779,31 @@ double GPSheading(double lat1,double lon1,double lat2,double lon2){
   return CourseRads; 
   #endif
 }
+
+void ButstonPress() {
+ //Debounce switch
+      static unsigned long last_interrupt_time = 0;
+      unsigned long interrupt_time = millis();
+     // If interrupts come faster than 200ms, assume it's a bounce and ignore
+      if (interrupt_time - last_interrupt_time > 200)
+        {
+
+          VEXTon();
+          if (debugLED==true){
+            
+          turnOnRGB(0xFF0000,0); //red
+          MyDelay(1000);
+          turnOffRGB();
+          debugLED=false;
+          }
+          else{
+            turnOnRGB(0x00ff00,0); //red
+          MyDelay(1000);
+          turnOffRGB();
+          debugLED=true; 
+
+          }
+
+        }
+      last_interrupt_time = interrupt_time;
+ }
